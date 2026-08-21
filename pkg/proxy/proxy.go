@@ -346,6 +346,28 @@ func (p *Proxy) Handler() func(http.ResponseWriter, *http.Request) {
 	}
 }
 
+// applyUpstreamHeaders copies incoming request headers onto req according to
+// the server group's preserve_headers setting, then applies configured
+// headers which take precedence for any overlapping names.
+//
+// When preserve_headers is empty, all incoming headers are cloned (the
+// historical HTTP fan-out behavior). When it is set, only the listed
+// incoming headers are copied. Matching is case-insensitive.
+func applyUpstreamHeaders(req *http.Request, incoming http.Header, instance cfg.ServerGroup) {
+	if len(instance.PreserveHeaders) == 0 {
+		req.Header = incoming.Clone()
+		if req.Header == nil {
+			req.Header = make(http.Header)
+		}
+	} else {
+		req.Header = make(http.Header)
+		cfg.CopyPreservedHeaders(req.Header, incoming, instance.PreserveHeaders)
+	}
+	for key, value := range instance.Headers {
+		req.Header.Set(key, value)
+	}
+}
+
 // Forward the first valid response for non-query endpoints
 func forwardFirstResponse(_ context.Context, w http.ResponseWriter, results <-chan *proxyresponse.BackendResponse, _ []string, logger log.Logger) {
 	forwarded := false
@@ -487,10 +509,7 @@ func (p *Proxy) fanoutRequest(w http.ResponseWriter, r *http.Request, fn transfo
 				})
 			}
 
-			req.Header = r.Header.Clone()
-			for key, value := range instance.Headers {
-				req.Header.Set(key, value)
-			}
+			applyUpstreamHeaders(req, r.Header, instance)
 
 			traces.InjectTraceToHTTPRequest(upstreamCtx, req)
 

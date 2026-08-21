@@ -323,6 +323,196 @@ func TestProxy_UpstreamHeadersInjected(t *testing.T) {
 	require.Equal(t, "from-config", seen)
 }
 
+func TestApplyUpstreamHeaders(t *testing.T) {
+	t.Parallel()
+
+	newReq := func(t *testing.T) *http.Request {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, "http://loki.example/loki/api/v1/labels", nil)
+		require.NoError(t, err)
+		return req
+	}
+
+	t.Run("default clones all incoming headers", func(t *testing.T) {
+		t.Parallel()
+		req := newReq(t)
+		incoming := http.Header{}
+		incoming.Set("Authorization", "Bearer incoming")
+		incoming.Set("X-Custom", "custom")
+
+		applyUpstreamHeaders(req, incoming, cfg.ServerGroup{})
+
+		require.Equal(t, "Bearer incoming", req.Header.Get("Authorization"))
+		require.Equal(t, "custom", req.Header.Get("X-Custom"))
+	})
+
+	t.Run("forwards Authorization when listed", func(t *testing.T) {
+		t.Parallel()
+		req := newReq(t)
+		incoming := http.Header{}
+		incoming.Set("Authorization", "Bearer incoming")
+		incoming.Set("X-Custom", "custom")
+
+		applyUpstreamHeaders(req, incoming, cfg.ServerGroup{
+			PreserveHeaders: []string{"Authorization"},
+		})
+
+		require.Equal(t, "Bearer incoming", req.Header.Get("Authorization"))
+		require.Empty(t, req.Header.Get("X-Custom"))
+	})
+
+	t.Run("forwards custom headers when listed", func(t *testing.T) {
+		t.Parallel()
+		req := newReq(t)
+		incoming := http.Header{}
+		incoming.Set("X-Scope-OrgID", "tenant-a")
+		incoming.Set("X-Custom", "custom")
+		incoming.Set("Authorization", "Bearer incoming")
+
+		applyUpstreamHeaders(req, incoming, cfg.ServerGroup{
+			PreserveHeaders: []string{"X-Scope-OrgID", "X-Custom"},
+		})
+
+		require.Equal(t, "tenant-a", req.Header.Get("X-Scope-OrgID"))
+		require.Equal(t, "custom", req.Header.Get("X-Custom"))
+		require.Empty(t, req.Header.Get("Authorization"))
+	})
+
+	t.Run("blocks headers that are not listed", func(t *testing.T) {
+		t.Parallel()
+		req := newReq(t)
+		incoming := http.Header{}
+		incoming.Set("Authorization", "Bearer incoming")
+		incoming.Set("Cookie", "secret")
+		incoming.Set("X-Custom", "custom")
+
+		applyUpstreamHeaders(req, incoming, cfg.ServerGroup{
+			PreserveHeaders: []string{"Authorization"},
+		})
+
+		require.Equal(t, "Bearer incoming", req.Header.Get("Authorization"))
+		require.Empty(t, req.Header.Get("Cookie"))
+		require.Empty(t, req.Header.Get("X-Custom"))
+	})
+
+	t.Run("configured headers take precedence over preserved incoming values", func(t *testing.T) {
+		t.Parallel()
+		req := newReq(t)
+		incoming := http.Header{}
+		incoming.Set("Authorization", "Bearer incoming")
+		incoming.Set("X-Scope-OrgID", "tenant-incoming")
+
+		applyUpstreamHeaders(req, incoming, cfg.ServerGroup{
+			PreserveHeaders: []string{"Authorization", "X-Scope-OrgID"},
+			Headers: map[string]string{
+				"Authorization": "Bearer configured",
+			},
+		})
+
+		require.Equal(t, "Bearer configured", req.Header.Get("Authorization"))
+		require.Equal(t, "tenant-incoming", req.Header.Get("X-Scope-OrgID"))
+	})
+
+	t.Run("matches preserve_headers case-insensitively", func(t *testing.T) {
+		t.Parallel()
+		req := newReq(t)
+		incoming := http.Header{}
+		incoming.Set("Authorization", "Bearer incoming")
+		incoming.Set("X-Scope-OrgID", "tenant-a")
+		incoming.Set("X-Custom", "custom")
+
+		applyUpstreamHeaders(req, incoming, cfg.ServerGroup{
+			PreserveHeaders: []string{"authorization", "x-scope-orgid"},
+		})
+
+		require.Equal(t, "Bearer incoming", req.Header.Get("Authorization"))
+		require.Equal(t, "tenant-a", req.Header.Get("X-Scope-OrgID"))
+		require.Empty(t, req.Header.Get("X-Custom"))
+	})
+}
+
+func TestProxy_PreserveHeaders_EndToEnd(t *testing.T) {
+	logger := log.NewNopLogger()
+	up := "/loki/api/v1/labels"
+
+	t.Run("default forwards incoming Authorization", func(t *testing.T) {
+		var seenAuth, seenCustom string
+		s1 := mkUpstreamServer(t, map[string]http.HandlerFunc{
+			up: func(w http.ResponseWriter, r *http.Request) {
+				seenAuth = r.Header.Get("Authorization")
+				seenCustom = r.Header.Get("X-Custom")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"labels":[]}`))
+			},
+		})
+		defer s1.Close()
+
+		cfg := mkConfig(s1.URL)
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, up, nil)
+		req.Header.Set("Authorization", "Bearer incoming")
+		req.Header.Set("X-Custom", "custom")
+
+		mustMux(t, logger, cfg).ServeHTTP(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.Equal(t, "Bearer incoming", seenAuth)
+		require.Equal(t, "custom", seenCustom)
+	})
+
+	t.Run("preserve_headers forwards Authorization and blocks other incoming headers", func(t *testing.T) {
+		var seenAuth, seenCustom, seenScope string
+		s1 := mkUpstreamServer(t, map[string]http.HandlerFunc{
+			up: func(w http.ResponseWriter, r *http.Request) {
+				seenAuth = r.Header.Get("Authorization")
+				seenCustom = r.Header.Get("X-Custom")
+				seenScope = r.Header.Get("X-Scope-OrgID")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"labels":[]}`))
+			},
+		})
+		defer s1.Close()
+
+		cfg := mkConfig(s1.URL)
+		cfg.ServerGroups[0].PreserveHeaders = []string{"Authorization", "X-Scope-OrgID"}
+
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, up, nil)
+		req.Header.Set("Authorization", "Bearer incoming")
+		req.Header.Set("X-Scope-OrgID", "tenant-a")
+		req.Header.Set("X-Custom", "custom")
+
+		mustMux(t, logger, cfg).ServeHTTP(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.Equal(t, "Bearer incoming", seenAuth)
+		require.Equal(t, "tenant-a", seenScope)
+		require.Empty(t, seenCustom)
+	})
+
+	t.Run("configured headers take precedence over preserved incoming values", func(t *testing.T) {
+		var seenAuth string
+		s1 := mkUpstreamServer(t, map[string]http.HandlerFunc{
+			up: func(w http.ResponseWriter, r *http.Request) {
+				seenAuth = r.Header.Get("Authorization")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"labels":[]}`))
+			},
+		})
+		defer s1.Close()
+
+		cfg := mkConfig(s1.URL)
+		cfg.ServerGroups[0].PreserveHeaders = []string{"Authorization"}
+		cfg.ServerGroups[0].Headers["Authorization"] = "Bearer configured"
+
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, up, nil)
+		req.Header.Set("Authorization", "Bearer incoming")
+
+		mustMux(t, logger, cfg).ServeHTTP(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.Equal(t, "Bearer configured", seenAuth)
+	})
+}
+
 func TestProxy_DetectedFieldValues_UpstreamFailure(t *testing.T) {
 	logger := log.NewNopLogger()
 	encoded := url.PathEscape("foo")

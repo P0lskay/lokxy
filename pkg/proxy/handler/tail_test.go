@@ -165,6 +165,124 @@ func TestHandleTailWebSocket_Integration(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestHandleTailWebSocket_PreserveHeaders(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	logger := log.NewNopLogger()
+	got := make(chan http.Header, 1)
+
+	mockLokiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+
+		upgrader := websocket.Upgrader{
+			CheckOrigin: func(_ *http.Request) bool { return true },
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		time.Sleep(50 * time.Millisecond)
+	}))
+	defer mockLokiServer.Close()
+
+	serverGroup := cfg.ServerGroup{
+		Name:            "test-backend",
+		URL:             mockLokiServer.URL,
+		PreserveHeaders: []string{"Authorization", "X-Scope-OrgID"},
+		Headers: map[string]string{
+			"X-Scope-OrgID": "from-config",
+		},
+	}
+	serverGroup.HTTPClientConfig.DialTimeout = 5 * time.Second
+
+	config := &cfg.Config{
+		ServerGroups: []cfg.ServerGroup{serverGroup},
+	}
+
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		HandleTailWebSocket(context.Background(), w, r, config, logger)
+	}))
+	defer proxyServer.Close()
+
+	proxyWSURL := "ws" + strings.TrimPrefix(proxyServer.URL, "http")
+	client, _, err := websocket.DefaultDialer.Dial(proxyWSURL, http.Header{
+		"Authorization": []string{"Bearer incoming"},
+		"X-Custom":      []string{"custom"},
+		"X-Scope-OrgID": []string{"tenant-incoming"},
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	select {
+	case hdr := <-got:
+		require.Equal(t, "Bearer incoming", hdr.Get("Authorization"))
+		require.Equal(t, "from-config", hdr.Get("X-Scope-OrgID"))
+		require.Empty(t, hdr.Get("X-Custom"))
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for backend handshake")
+	}
+}
+
+func TestHandleTailWebSocket_DefaultDoesNotForwardIncomingHeaders(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	logger := log.NewNopLogger()
+	got := make(chan http.Header, 1)
+
+	mockLokiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+
+		upgrader := websocket.Upgrader{
+			CheckOrigin: func(_ *http.Request) bool { return true },
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		time.Sleep(50 * time.Millisecond)
+	}))
+	defer mockLokiServer.Close()
+
+	serverGroup := cfg.ServerGroup{
+		Name: "test-backend",
+		URL:  mockLokiServer.URL,
+		Headers: map[string]string{
+			"X-Lokxy": "from-config",
+		},
+	}
+	serverGroup.HTTPClientConfig.DialTimeout = 5 * time.Second
+
+	config := &cfg.Config{
+		ServerGroups: []cfg.ServerGroup{serverGroup},
+	}
+
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		HandleTailWebSocket(context.Background(), w, r, config, logger)
+	}))
+	defer proxyServer.Close()
+
+	proxyWSURL := "ws" + strings.TrimPrefix(proxyServer.URL, "http")
+	client, _, err := websocket.DefaultDialer.Dial(proxyWSURL, http.Header{
+		"Authorization": []string{"Bearer incoming"},
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	select {
+	case hdr := <-got:
+		require.Empty(t, hdr.Get("Authorization"))
+		require.Equal(t, "from-config", hdr.Get("X-Lokxy"))
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for backend handshake")
+	}
+}
+
 func TestHandleTailWebSocket_NoBackends(t *testing.T) {
 	logger := log.NewNopLogger()
 	config := &cfg.Config{

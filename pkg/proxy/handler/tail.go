@@ -151,6 +151,9 @@ func HandleTailWebSocket(ctx context.Context, w http.ResponseWriter, r *http.Req
 
 			// Create WebSocket connection to Loki instance
 			headers := http.Header{}
+			if len(instance.PreserveHeaders) > 0 {
+				cfg.CopyPreservedHeaders(headers, r.Header, instance.PreserveHeaders)
+			}
 			for key, value := range instance.Headers {
 				headers.Set(key, value)
 			}

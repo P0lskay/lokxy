@@ -114,6 +114,11 @@ server_groups:
     headers:
       Authorization: "Bearer <token>"
       X-Scope-OrgID: org1
+    # Forward selected incoming request headers. Matching is case-insensitive.
+    # Configured `headers` above take precedence when the same name appears in both.
+    preserve_headers:
+      - Authorization
+      - X-Scope-OrgID
 
   - name: "Loki 2"
     url: "http://localhost:3101"
@@ -154,7 +159,8 @@ logging:
     * `name`: A human-readable name for the Loki instance.
     * `url`: The base URL of the Loki instance.
     * `timeout`: Timeout for requests in seconds.
-    * `headers`: Custom headers to include in each request, such as authentication tokens.
+    * `headers`: Custom headers to include in each request, such as authentication tokens. These overwrite any incoming header of the same name.
+    * `preserve_headers`: Optional list of incoming request header names to copy onto upstream requests. Matching is case-insensitive. When omitted or empty, HTTP fan-out keeps its historical behavior of cloning all incoming headers, and WebSocket tail connections send only configured `headers`. If the same header is also set in `headers`, the configured value takes precedence. When this list is set, HTTP fan-out copies only the listed incoming headers (plus configured `headers`).
     * `ignore_error`: When `true`, this server group's response is optional — see [Error Handling and Partial Results](#error-handling-and-partial-results). Default: `false`.
     * `downgrade_error`: When `true`, this server group's errors are surfaced as warnings instead of failing the query — see [Error Handling and Partial Results](#error-handling-and-partial-results). Default: `false`. Mutually exclusive with `ignore_error`.
     * `http_client_config`: HTTP Client custom configurations
