@@ -38,11 +38,18 @@ type HTTPClientConfig struct {
 
 // ServerGroup represents a single Loki instance configuration
 type ServerGroup struct {
-	Name             string            `yaml:"name"`
-	URL              string            `yaml:"url"`
-	Timeout          int               `yaml:"timeout"`
-	Headers          map[string]string `yaml:"headers"`
-	HTTPClientConfig HTTPClientConfig  `yaml:"http_client_config"` // Add HTTP config
+	Name    string `yaml:"name"`
+	URL     string `yaml:"url"`
+	Timeout int    `yaml:"timeout"`
+	// Headers are static headers added to every upstream request. When the same
+	// header is also listed in PreserveHeaders, these configured values win.
+	Headers map[string]string `yaml:"headers"`
+	// PreserveHeaders is an optional allow-list of incoming request header names
+	// to copy onto upstream requests. Matching is case-insensitive. When empty,
+	// HTTP fan-out keeps its historical behavior of cloning all incoming
+	// headers; WebSocket tail requests still start from a blank header map.
+	PreserveHeaders  []string         `yaml:"preserve_headers"`
+	HTTPClientConfig HTTPClientConfig `yaml:"http_client_config"` // Add HTTP config
 
 	// IgnoreError makes this server group's response optional: if it fails but
 	// other groups succeed, the overall query still succeeds with partial

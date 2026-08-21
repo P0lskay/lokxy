@@ -62,6 +62,7 @@ func TestLoadConfig(t *testing.T) {
 				require.Equal(t, 30, cfg.ServerGroups[0].Timeout)
 				require.Equal(t, "Bearer prod-token", cfg.ServerGroups[0].Headers["Authorization"])
 				require.Equal(t, "tenant-1", cfg.ServerGroups[0].Headers["X-Scope-OrgID"])
+				require.Equal(t, []string{"Authorization", "X-Scope-OrgID"}, cfg.ServerGroups[0].PreserveHeaders)
 
 				// Verify TLS config
 				require.False(t, cfg.ServerGroups[0].HTTPClientConfig.TLSConfig.InsecureSkipVerify)

@@ -5,6 +5,9 @@ server_groups:
     headers:
       Authorization: Bearer prod-token
       X-Scope-OrgID: tenant-1
+    preserve_headers:
+      - Authorization
+      - X-Scope-OrgID
     http_client_config:
       dial_timeout: 5s
       transport:
